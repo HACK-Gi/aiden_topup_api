@@ -689,8 +689,4 @@ def answer_callback(callback_id, text=""):
 # -------------------------------------------------------------------
 # Run
 # -------------------------------------------------------------------
-if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
-        populate_services()
     app = Flask(__name__)
