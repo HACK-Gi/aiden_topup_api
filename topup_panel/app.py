@@ -14,27 +14,12 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from dotenv import load_dotenv
 import requests
 
-# ------------------------------------------------------------------------------
-# កំណត់បរិស្ថាន (Vercel អានអថេរពី Dashboard, .env សម្រាប់ local dev)
-# ------------------------------------------------------------------------------
-load_dotenv(override=True)  # ឲ្យ .env ជាន់ពីលើអថេរ environment
+# Load environment variables
+load_dotenv()
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret')
-
-# --- ការកែ 1: បន្ថែមការពង្រឹងការកំណត់ Database URI ---
-_uri = os.getenv('DATABASE_URL', '').strip()
-if _uri:
-    # ជួសជុលបញ្ហា dialect "postgres://" → "postgresql://"
-    if _uri.startswith('postgres://'):
-        _uri = _uri.replace('postgres://', 'postgresql://', 1)
-    # បញ្ចូល sslmode បើមិនទាន់មាន ប៉ុន្តែត្រូវការដោយ Vercel
-    if 'sslmode' not in _uri and 'postgresql' in _uri:
-        _uri += '?sslmode=require'
-else:
-    _uri = 'sqlite:///database.db'  # fallback សម្រាប់ local dev
-
-app.config['SQLALCHEMY_DATABASE_URI'] = _uri
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-me')
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'sqlite:///database.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
@@ -42,18 +27,13 @@ login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 login_manager.login_message = 'សូមចូលគណនីដើម្បីបន្ត។'
 
-# --- ការកែ 2: រក្សា SECRET_KEY ឲ្យថេរសម្រាប់ session ---
-# Vercel Serverless ផ្លាស់ប្តូរ SECRET_KEY រាល់ពេលដំណើរការមុខងារ
-# ដូច្នេះ session cookie មិនអាចប្រើបានទេ។ ត្រូវប្រើ SECRET_KEY ថេរ
-# ដែលបានកំណត់ក្នុង Vercel Dashboard Environment Variables
-
-# Telegram credentials
+# Telegram config
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID')
 
-# ------------------------------------------------------------------------------
-# Database Models
-# ------------------------------------------------------------------------------
+# -------------------------------------------------------------------
+# Database models
+# -------------------------------------------------------------------
 class User(UserMixin, db.Model):
     __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
@@ -68,7 +48,7 @@ class User(UserMixin, db.Model):
 
     @property
     def is_active(self):
-        # អ្នកប្រើសកម្ម បើមិនត្រូវបានហាមឃាត់
+        # គណនីសកម្ម លុះត្រាតែមិនត្រូវបានហាមឃាត់
         return not self.is_banned
 
     def set_password(self, password):
@@ -82,7 +62,7 @@ class Deposit(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     amount = db.Column(db.Float, nullable=False)
-    status = db.Column(db.String(20), default='pending')
+    status = db.Column(db.String(20), default='pending')      # pending/accepted/rejected
     telegram_message_id = db.Column(db.Integer, nullable=True)
     telegram_chat_id = db.Column(db.String(50), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -92,12 +72,12 @@ class Order(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     service_id = db.Column(db.Integer, db.ForeignKey('services.id'), nullable=True)
-    game = db.Column(db.String(10), nullable=False)
+    game = db.Column(db.String(10), nullable=False)            # ff, mg, pg, hok, mc
     uid = db.Column(db.String(50), nullable=False)
     server_id = db.Column(db.String(50), nullable=True)
     product_name = db.Column(db.String(50), nullable=False)
     price = db.Column(db.Float, nullable=False)
-    status = db.Column(db.String(20), default='pending')
+    status = db.Column(db.String(20), default='pending')       # pending/completed/failed
     command_text = db.Column(db.String(255), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -108,20 +88,20 @@ class Service(db.Model):
     product_name = db.Column(db.String(50), nullable=False)
     supplier_price = db.Column(db.Float, nullable=False)
     selling_price = db.Column(db.Float, nullable=False)
-    command_format = db.Column(db.String(100), nullable=False)
+    command_format = db.Column(db.String(100), nullable=False)     # e.g., '/ff {uid} {product_name}'
     requires_server_id = db.Column(db.Boolean, default=False)
     is_active = db.Column(db.Boolean, default=True)
 
-# ------------------------------------------------------------------------------
-# User Loader
-# ------------------------------------------------------------------------------
+# -------------------------------------------------------------------
+# Login manager
+# -------------------------------------------------------------------
 @login_manager.user_loader
 def load_user(user_id):
     return User.query.get(int(user_id))
 
-# ------------------------------------------------------------------------------
-# CSRF Protection (សាមញ្ញ)
-# ------------------------------------------------------------------------------
+# -------------------------------------------------------------------
+# Simple CSRF protection
+# -------------------------------------------------------------------
 def generate_csrf_token():
     if '_csrf_token' not in session:
         session['_csrf_token'] = ''.join(random.choices(string.ascii_letters + string.digits, k=32))
@@ -139,13 +119,23 @@ def csrf_required(f):
 
 app.jinja_env.globals['csrf_token'] = generate_csrf_token
 
-# ------------------------------------------------------------------------------
-# Telegram Functions
-# ------------------------------------------------------------------------------
-def send_telegram_message(chat_id, text, reply_markup=None):
+# Admin required decorator
+def admin_required(f):
+    @wraps(f)
+    @login_required
+    def decorated_function(*args, **kwargs):
+        if not current_user.is_admin:
+            abort(403)
+        return f(*args, **kwargs)
+    return decorated_function
+
+# -------------------------------------------------------------------
+# Telegram helpers
+# -------------------------------------------------------------------
+def send_telegram(chat_id, text, reply_markup=None):
     if not BOT_TOKEN:
         return None
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    url = f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage'
     payload = {'chat_id': chat_id, 'text': text, 'parse_mode': 'HTML'}
     if reply_markup:
         payload['reply_markup'] = json.dumps(reply_markup)
@@ -153,46 +143,35 @@ def send_telegram_message(chat_id, text, reply_markup=None):
         r = requests.post(url, json=payload, timeout=10)
         return r.json()
     except Exception as e:
-        print("Telegram send error:", e)
+        print('Telegram error:', e)
         return None
 
 def edit_telegram_message(chat_id, message_id, text, reply_markup=None):
     if not BOT_TOKEN:
         return
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+    url = f'https://api.telegram.org/bot{BOT_TOKEN}/editMessageText'
     payload = {'chat_id': chat_id, 'message_id': message_id, 'text': text, 'parse_mode': 'HTML'}
     if reply_markup:
         payload['reply_markup'] = json.dumps(reply_markup)
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print("Telegram edit error:", e)
+        print('Telegram edit error:', e)
 
-def answer_callback(callback_id, text=""):
-    if not BOT_TOKEN:
-        return
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
-    payload = {'callback_query_id': callback_id, 'text': text}
-    try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print("Callback error:", e)
-
-# ------------------------------------------------------------------------------
-# Pricing Logic (ប្រាក់ចំណេញ 3-6%)
-# ------------------------------------------------------------------------------
+# -------------------------------------------------------------------
+# Auto pricing (very low profit 3-6%)
+# -------------------------------------------------------------------
 def apply_markup(supplier_price):
+    """Mild markup for competitive pricing."""
     if supplier_price < 1.0:
-        margin = 0.06
+        margin = 0.06  # 6%
     elif supplier_price < 10.0:
-        margin = 0.04
+        margin = 0.04  # 4%
     else:
-        margin = 0.03
+        margin = 0.03  # 3%
     return round(supplier_price * (1 + margin), 2)
 
-# ------------------------------------------------------------------------------
-# Data Services (ដូចដើម)
-# ------------------------------------------------------------------------------
+# Prepopulate services from given data
 SERVICES_DATA = [
     # (game, product, supplier_price, command_format, needs_server_id)
     # FREE FIRE
@@ -228,7 +207,7 @@ SERVICES_DATA = [
     ("ff", "Level20", 0.68, "/ff {uid} Level20", False),
     ("ff", "Level25", 0.68, "/ff {uid} Level25", False),
     ("ff", "Level30", 0.68, "/ff {uid} Level30", False),
-    # MOBILE LEGENDS (ត្រូវការ server_id)
+    # MOBILE LEGENDS (requires server id)
     ("mg", "55", 0.84, "/mg {uid} {server_id} 55", True),
     ("mg", "86", 1.25, "/mg {uid} {server_id} 86", True),
     ("mg", "112", 1.76, "/mg {uid} {server_id} 112", True),
@@ -297,7 +276,7 @@ SERVICES_DATA = [
     ("hok", "2508", 25.99, "/hok {uid} 2508", False),
     ("hok", "4180", 43.25, "/hok {uid} 4180", False),
     ("hok", "8360", 86.50, "/hok {uid} 8360", False),
-    # MAGIC CHESS GOGO (ត្រូវការ server_id)
+    # MAGIC CHESS GOGO (requires server id)
     ("mc", "Weekly", 1.90, "/mc {uid} {server_id} Weekly", True),
     ("mc", "5", 0.15, "/mc {uid} {server_id} 5", True),
     ("mc", "12", 0.30, "/mc {uid} {server_id} 12", True),
@@ -316,8 +295,8 @@ SERVICES_DATA = [
     ("mc", "4830", 58.27, "/mc {uid} {server_id} 4830", True),
 ]
 
-
 def populate_services():
+    """Insert services into DB if empty."""
     if Service.query.first() is None:
         for game, product, supplier, cmd, needs_server in SERVICES_DATA:
             selling = apply_markup(supplier)
@@ -329,9 +308,9 @@ def populate_services():
             db.session.add(s)
         db.session.commit()
 
-# ------------------------------------------------------------------------------
-# Routes (រក្សាទុកទាំងអស់ដូចដើម)
-# ------------------------------------------------------------------------------
+# -------------------------------------------------------------------
+# Routes
+# -------------------------------------------------------------------
 @app.route('/')
 def index():
     services = Service.query.filter_by(is_active=True).all()
@@ -360,7 +339,8 @@ def register():
         user.set_password(password)
         db.session.add(user)
         db.session.commit()
-        send_telegram_message(ADMIN_CHAT_ID, f"🆕 អ្នកប្រើថ្មីបានចុះឈ្មោះ\n👤 <b>{username}</b>\n📧 {email}")
+        # Telegram notification
+        send_telegram(ADMIN_CHAT_ID, f"🆕 អ្នកប្រើថ្មីបានចុះឈ្មោះ\n👤 <b>{username}</b>\n📧 {email}")
         login_user(user)
         flash('ចុះឈ្មោះជោគជ័យ!', 'success')
         return redirect(url_for('dashboard'))
@@ -418,30 +398,33 @@ def deposit():
         except:
             flash('ចំនួនទឹកប្រាក់មិនត្រឹមត្រូវ។', 'danger')
             return redirect(url_for('deposit'))
+
         dep = Deposit(user_id=current_user.id, amount=amount)
         db.session.add(dep)
         db.session.commit()
+
         # Send Telegram message with inline buttons
         inline_keyboard = {
             "inline_keyboard": [
                 [
-                    {"text": "✅ ទទួល", "callback_data": f"accept_{dep.id}"},
-                    {"text": "❌ បដិសេធ", "callback_data": f"reject_{dep.id}"}
+                    {"text": "✅ ទទួល (Accept)", "callback_data": f"accept_{dep.id}"},
+                    {"text": "❌ បដិសេធ (Reject)", "callback_data": f"reject_{dep.id}"}
                 ]
             ]
         }
-        msg = send_telegram_message(
+        msg = send_telegram(
             ADMIN_CHAT_ID,
             f"💰 <b>ប្រាក់តម្កល់ថ្មី</b>\n"
-            f"👤 {current_user.username}\n"
-            f"💵 ${amount:.2f}\n"
-            f"📌 កំពុងរងចាំ",
+            f"👤 អ្នកប្រើ៖ {current_user.username}\n"
+            f"💵 ចំនួន៖ ${amount:.2f}\n"
+            f"📌 ស្ថានភាព៖ កំពុងរងចាំ",
             reply_markup=inline_keyboard
         )
         if msg and msg.get('ok'):
             dep.telegram_message_id = msg['result']['message_id']
             dep.telegram_chat_id = str(msg['result']['chat']['id'])
             db.session.commit()
+
         flash('សំណើតម្កល់ប្រាក់បានដាក់ស្នើ។ សូមរង់ចាំ Admin យល់ព្រម។', 'info')
         return redirect(url_for('dashboard'))
     return render_template('deposit.html')
@@ -451,7 +434,7 @@ def deposit():
 @csrf_required
 def generate_api_key():
     if current_user.api_key:
-        flash('អ្នកមាន API Key រួចហើយ។ អាចកំណត់ឡើងវិញបាន។', 'warning')
+        flash('អ្នកមាន API Key រួចហើយ។ អាចកំណត់ឡើងវិញ (Reset) បាន។', 'warning')
         return redirect(url_for('dashboard'))
     key = 'api_sk_' + ''.join(random.choices(string.ascii_letters + string.digits, k=32))
     while User.query.filter_by(api_key=key).first():
@@ -505,10 +488,11 @@ def api_order():
     if not game or not uid or not product:
         return jsonify({"status": "error", "message": "Missing service/uid/product"}), 400
 
-    # Game names mapping (mg, mc require server_id)
+    # Game names mapping
     if game in ['mg', 'mc'] and not server_id:
         return jsonify({"status": "error", "message": "Server ID required for this game"}), 400
 
+    # Find service
     service = Service.query.filter_by(game=game, product_name=product, is_active=True).first()
     if not service:
         return jsonify({"status": "error", "message": "Service not found"}), 404
@@ -523,6 +507,7 @@ def api_order():
     else:
         cmd = service.command_format.format(uid=uid, product_name=product)
 
+    # Deduct balance
     user.balance -= price
     order = Order(
         user_id=user.id, service_id=service.id,
@@ -534,7 +519,7 @@ def api_order():
     db.session.commit()
 
     # Notify admin
-    send_telegram_message(
+    send_telegram(
         ADMIN_CHAT_ID,
         f"🛒 <b>បញ្ជាទិញថ្មី</b>\n"
         f"👤 {user.username}\n"
@@ -551,16 +536,7 @@ def api_order():
         "command": cmd
     })
 
-# ======================== Admin Panel ========================
-def admin_required(f):
-    @wraps(f)
-    @login_required
-    def decorated_function(*args, **kwargs):
-        if not current_user.is_admin:
-            abort(403)
-        return f(*args, **kwargs)
-    return decorated_function
-
+# ======================== Admin panel ========================
 @app.route('/admin')
 @admin_required
 def admin_panel():
@@ -580,7 +556,7 @@ def admin_panel():
 def admin_approve_deposit(deposit_id):
     dep = Deposit.query.get_or_404(deposit_id)
     if dep.status != 'pending':
-        flash('ប្រាក់តម្កល់នេះបានដំណើរការរួចហើយ។', 'warning')
+        flash('Deposit already processed.', 'warning')
         return redirect(url_for('admin_panel'))
     user = User.query.get(dep.user_id)
     if not user:
@@ -588,12 +564,16 @@ def admin_approve_deposit(deposit_id):
     dep.status = 'accepted'
     user.balance += dep.amount
     db.session.commit()
+    # Update Telegram message if exists
     if dep.telegram_message_id and dep.telegram_chat_id:
         edit_telegram_message(
             dep.telegram_chat_id, dep.telegram_message_id,
-            f"✅ <b>បានយល់ព្រម</b>\n👤 {user.username}\n💵 ${dep.amount:.2f}"
+            f"✅ <b>ប្រាក់តម្កល់ត្រូវបានយល់ព្រម</b>\n"
+            f"👤 {user.username}\n"
+            f"💵 ${dep.amount:.2f}\n"
+            f"📌 បញ្ចប់"
         )
-    flash('បានយល់ព្រម និងបញ្ចូលសមតុល្យ។', 'success')
+    flash('Deposit approved. Balance updated.', 'success')
     return redirect(url_for('admin_panel'))
 
 @app.route('/admin/reject_deposit/<int:deposit_id>', methods=['POST'])
@@ -602,16 +582,18 @@ def admin_approve_deposit(deposit_id):
 def admin_reject_deposit(deposit_id):
     dep = Deposit.query.get_or_404(deposit_id)
     if dep.status != 'pending':
-        flash('ប្រាក់តម្កល់នេះបានដំណើរការរួចហើយ។', 'warning')
+        flash('Deposit already processed.', 'warning')
         return redirect(url_for('admin_panel'))
     dep.status = 'rejected'
     db.session.commit()
     if dep.telegram_message_id and dep.telegram_chat_id:
         edit_telegram_message(
             dep.telegram_chat_id, dep.telegram_message_id,
-            f"❌ <b>បានបដិសេធ</b>\n👤 {User.query.get(dep.user_id).username}\n💵 ${dep.amount:.2f}"
+            f"❌ <b>ប្រាក់តម្កល់ត្រូវបានបដិសេធ</b>\n"
+            f"👤 {User.query.get(dep.user_id).username}\n"
+            f"💵 ${dep.amount:.2f}"
         )
-    flash('បានបដិសេធសំណើតម្កល់ប្រាក់។', 'info')
+    flash('Deposit rejected.', 'info')
     return redirect(url_for('admin_panel'))
 
 @app.route('/admin/ban_user/<int:user_id>', methods=['POST'])
@@ -620,9 +602,9 @@ def admin_reject_deposit(deposit_id):
 def admin_ban_user(user_id):
     user = User.query.get_or_404(user_id)
     user.is_banned = not user.is_banned
-    status = "បានហាមឃាត់" if user.is_banned else "បានដោះហាមឃាត់"
+    status = "banned" if user.is_banned else "unbanned"
     db.session.commit()
-    flash(f'{user.username} {status}។', 'success')
+    flash(f'User {user.username} {status}.', 'success')
     return redirect(url_for('admin_panel'))
 
 @app.route('/admin/add_balance/<int:user_id>', methods=['POST'])
@@ -632,11 +614,11 @@ def admin_add_balance(user_id):
     user = User.query.get_or_404(user_id)
     amount = request.form.get('amount', 0, type=float)
     if amount <= 0:
-        flash('ចំនួនត្រូវតែវិជ្ជមាន។', 'danger')
+        flash('Amount must be positive.', 'danger')
     else:
         user.balance += amount
         db.session.commit()
-        flash(f'បានបន្ថែម ${amount:.2f} ទៅ {user.username}។ សមតុល្យថ្មី៖ ${user.balance:.2f}', 'success')
+        flash(f'Added ${amount:.2f} to {user.username}. New balance: ${user.balance:.2f}', 'success')
     return redirect(url_for('admin_panel'))
 
 @app.route('/admin/update_price/<int:service_id>', methods=['POST'])
@@ -648,12 +630,12 @@ def admin_update_price(service_id):
     if new_price is not None and new_price > 0:
         service.selling_price = new_price
         db.session.commit()
-        flash('តម្លៃត្រូវបានធ្វើបច្ចុប្បន្នភាព។', 'success')
+        flash('Price updated.', 'success')
     else:
-        flash('តម្លៃមិនត្រឹមត្រូវ។', 'danger')
+        flash('Invalid price.', 'danger')
     return redirect(url_for('admin_panel'))
 
-# ======================== Telegram Webhook ========================
+# ======================== Telegram webhook ========================
 @app.route('/webhook/telegram', methods=['POST'])
 def telegram_webhook():
     data = request.get_json()
@@ -679,26 +661,36 @@ def telegram_webhook():
                     db.session.commit()
                     edit_telegram_message(
                         chat_id, message_id,
-                        f"✅ <b>បានយល់ព្រម</b>\n👤 {user.username}\n💵 ${dep.amount:.2f}"
+                        f"✅ <b>បានយល់ព្រម</b>\n"
+                        f"👤 {user.username}\n"
+                        f"💵 ${dep.amount:.2f}\n"
+                        f"📌 បញ្ចប់"
                     )
-                else:
+                else:  # reject
                     dep.status = 'rejected'
                     db.session.commit()
                     edit_telegram_message(
                         chat_id, message_id,
-                        f"❌ <b>បានបដិសេធ</b>\n👤 {user.username}\n💵 ${dep.amount:.2f}"
+                        f"❌ <b>បានបដិសេធ</b>\n"
+                        f"👤 {user.username}\n"
+                        f"💵 ${dep.amount:.2f}"
                     )
-            answer_callback(cb_id, "រួចរាល់")
+            answer_callback(cb_id, "Done")
         return jsonify({"status": "ok"})
     return 'ok', 200
 
-# ------------------------------------------------------------------------------
-# បង្កើតតារាង និងទិន្នន័យសេវាកម្ម (ដំណើរការពេល import)
-# ------------------------------------------------------------------------------
-with app.app_context():
-    db.create_all()
-    populate_services()
+def answer_callback(callback_id, text=""):
+    if not BOT_TOKEN:
+        return
+    url = f'https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery'
+    payload = {'callback_query_id': callback_id, 'text': text}
+    requests.post(url, json=payload, timeout=10)
 
-# សំខាន់៖ គ្មាន app.run() សម្រាប់ Vercel
-# if __name__ == '__main__':
-#     app.run(debug=True)
+# -------------------------------------------------------------------
+# Run
+# -------------------------------------------------------------------
+if __name__ == '__main__':
+    with app.app_context():
+        db.create_all()
+        populate_services()
+    app.run(debug=True)
