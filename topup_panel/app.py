@@ -21,13 +21,31 @@ load_dotenv(override=True)  # ឲ្យ .env ជាន់ពីលើអថេ�
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret')
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'sqlite:///database.db')
+
+# --- ការកែ 1: បន្ថែមការពង្រឹងការកំណត់ Database URI ---
+_uri = os.getenv('DATABASE_URL', '').strip()
+if _uri:
+    # ជួសជុលបញ្ហា dialect "postgres://" → "postgresql://"
+    if _uri.startswith('postgres://'):
+        _uri = _uri.replace('postgres://', 'postgresql://', 1)
+    # បញ្ចូល sslmode បើមិនទាន់មាន ប៉ុន្តែត្រូវការដោយ Vercel
+    if 'sslmode' not in _uri and 'postgresql' in _uri:
+        _uri += '?sslmode=require'
+else:
+    _uri = 'sqlite:///database.db'  # fallback សម្រាប់ local dev
+
+app.config['SQLALCHEMY_DATABASE_URI'] = _uri
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 login_manager.login_message = 'សូមចូលគណនីដើម្បីបន្ត។'
+
+# --- ការកែ 2: រក្សា SECRET_KEY ឲ្យថេរសម្រាប់ session ---
+# Vercel Serverless ផ្លាស់ប្តូរ SECRET_KEY រាល់ពេលដំណើរការមុខងារ
+# ដូច្នេះ session cookie មិនអាចប្រើបានទេ។ ត្រូវប្រើ SECRET_KEY ថេរ
+# ដែលបានកំណត់ក្នុង Vercel Dashboard Environment Variables
 
 # Telegram credentials
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -173,7 +191,7 @@ def apply_markup(supplier_price):
     return round(supplier_price * (1 + margin), 2)
 
 # ------------------------------------------------------------------------------
-# Data Services
+# Data Services (ដូចដើម)
 # ------------------------------------------------------------------------------
 SERVICES_DATA = [
     # (game, product, supplier_price, command_format, needs_server_id)
@@ -298,6 +316,7 @@ SERVICES_DATA = [
     ("mc", "4830", 58.27, "/mc {uid} {server_id} 4830", True),
 ]
 
+
 def populate_services():
     if Service.query.first() is None:
         for game, product, supplier, cmd, needs_server in SERVICES_DATA:
@@ -311,7 +330,7 @@ def populate_services():
         db.session.commit()
 
 # ------------------------------------------------------------------------------
-# Routes
+# Routes (រក្សាទុកទាំងអស់ដូចដើម)
 # ------------------------------------------------------------------------------
 @app.route('/')
 def index():
@@ -679,3 +698,7 @@ def telegram_webhook():
 with app.app_context():
     db.create_all()
     populate_services()
+
+# សំខាន់៖ គ្មាន app.run() សម្រាប់ Vercel
+# if __name__ == '__main__':
+#     app.run(debug=True)
