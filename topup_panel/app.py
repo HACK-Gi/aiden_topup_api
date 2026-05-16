@@ -689,4 +689,12 @@ def answer_callback(callback_id, text=""):
 # -------------------------------------------------------------------
 # Run
 # -------------------------------------------------------------------
-    app = Flask(__name__)
+    # Vercel requires the app object to be named 'app'
+# Keep the database creation but protect against double execution
+with app.app_context():
+    db.create_all()
+    populate_services()
+
+# For local development only
+if __name__ == '__main__':
+    app.run(debug=True)
